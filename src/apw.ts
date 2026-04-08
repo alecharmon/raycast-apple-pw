@@ -462,12 +462,13 @@ function SecretActionListItem({
         icon: ui.Icon.Key,
         onAction: () => void onPassword(account),
       }),
-      h(ui.Action, {
-        title: "Copy 2FA Code",
-        icon: ui.Icon.Wand,
-        onAction: () => void onOtp(account),
-        isDisabled: !account.hasOtp,
-      }),
+      account.hasOtp
+        ? h(ui.Action, {
+            title: "Copy 2FA Code",
+            icon: ui.Icon.Wand,
+            onAction: () => void onOtp(account),
+          })
+        : null,
       createImportCsvAction(onImportCsv),
     ),
   });
@@ -710,7 +711,7 @@ export default function Command() {
         if (outcome.kind === "results") {
           setRows(outcome.rows);
           setAuthPrompt(null);
-        } else {
+        } else if (outcome.kind === "auth-required") {
           setAuthPrompt(outcome.prompt);
         }
       })
@@ -752,6 +753,9 @@ export default function Command() {
         setAuthPrompt(outcome.prompt);
         return;
       }
+      if (outcome.kind !== "secret") {
+        return;
+      }
 
       setAuthPrompt(null);
       await copySecretAndNotify(outcome);
@@ -776,6 +780,9 @@ export default function Command() {
       const outcome = await workflow.fetchOtp(account);
       if (outcome.kind === "auth-required") {
         setAuthPrompt(outcome.prompt);
+        return;
+      }
+      if (outcome.kind !== "secret") {
         return;
       }
 

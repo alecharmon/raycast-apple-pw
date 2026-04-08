@@ -13,10 +13,51 @@ import {
   loadPasswordsCsv,
   parsePasswordsCsv,
 } from "../apw";
+import { type ApplePwClient } from "../applepw";
+import { type AccountRepository } from "../db";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "./test-harness";
+
+function makeApplePwClient(overrides: Partial<ApplePwClient>): ApplePwClient {
+  return {
+    getStatus: async () => ({
+      kind: "success",
+      payload: { status: "ready", daemon: "running", authenticated: true },
+      stdout: "",
+      stderr: "",
+    }),
+    listPasswords: async () => ({
+      kind: "success",
+      payload: [],
+      stdout: "",
+      stderr: "",
+    }),
+    getPassword: async () => {
+      throw new Error("not used");
+    },
+    getOtp: async () => {
+      throw new Error("not used");
+    },
+    authenticate: async () => ({ status: 0 }),
+    execute: async () => {
+      throw new Error("not used");
+    },
+    ...overrides,
+  };
+}
+
+function makeRepository(
+  overrides: Partial<Pick<AccountRepository, "upsertDiscoveredAccounts" | "markAccountUsed" | "searchAccounts">>,
+): Pick<AccountRepository, "upsertDiscoveredAccounts" | "markAccountUsed" | "searchAccounts"> {
+  return {
+    upsertDiscoveredAccounts: async () => undefined,
+    markAccountUsed: async () => undefined,
+    searchAccounts: async () => [],
+    ...overrides,
+  };
+}
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -31,7 +72,7 @@ function deferred<T>() {
 test("ignores empty search queries without calling applepw", async () => {
   let listCalls = 0;
   const workflow = createPasswordSearchWorkflow({
-    applePw: {
+    applePw: makeApplePwClient({
       listPasswords: async () => {
         listCalls += 1;
         return {
@@ -51,13 +92,12 @@ test("ignores empty search queries without calling applepw", async () => {
       execute: async () => {
         throw new Error("not used");
       },
-    },
-    repository: {
+    }),
+    repository: makeRepository({
       upsertDiscoveredAccounts: async () => undefined,
       markAccountUsed: async () => undefined,
       searchAccounts: async () => [],
-      close: async () => undefined,
-    },
+    }),
   });
 
   const result = await workflow.search("   ");
@@ -110,7 +150,7 @@ test("keeps the latest auth-required search for pin retry", async () => {
   let authenticated = false;
 
   const workflow = createPasswordSearchWorkflow({
-    applePw: {
+    applePw: makeApplePwClient({
       listPasswords: async (query: string) => {
         calls.push(`list:${query}`);
         if (!authenticated) {
@@ -149,13 +189,12 @@ test("keeps the latest auth-required search for pin retry", async () => {
       execute: async () => {
         throw new Error("not used");
       },
-    },
-    repository: {
+    }),
+    repository: makeRepository({
       upsertDiscoveredAccounts: async () => undefined,
       markAccountUsed: async () => undefined,
       searchAccounts: async () => [],
-      close: async () => undefined,
-    },
+    }),
   });
 
   const firstSearch = workflow.search("first");
@@ -189,10 +228,11 @@ test("keeps the latest auth-required search for pin retry", async () => {
 
 test("renders cached rows after live discovery upserts accounts", async () => {
   const upserts: unknown[] = [];
-  const repository = {
+  const repository = makeRepository({
     upsertDiscoveredAccounts: async (accounts: unknown[]) => {
       upserts.push(accounts);
     },
+    markAccountUsed: async () => undefined,
     searchAccounts: async () => [
       {
         domain: "example.com",
@@ -203,11 +243,10 @@ test("renders cached rows after live discovery upserts accounts", async () => {
         lastUsedAt: undefined,
       },
     ],
-    close: async () => undefined,
-  };
+  });
 
   const workflow = createPasswordSearchWorkflow({
-    applePw: {
+    applePw: makeApplePwClient({
       listPasswords: async () => ({
         kind: "success",
         payload: [
@@ -232,7 +271,7 @@ test("renders cached rows after live discovery upserts accounts", async () => {
       execute: async () => {
         throw new Error("not used");
       },
-    },
+    }),
     repository,
   });
 
@@ -244,8 +283,9 @@ test("renders cached rows after live discovery upserts accounts", async () => {
 });
 
 test("falls back to cached rows when live discovery returns nothing", async () => {
-  const repository = {
+  const repository = makeRepository({
     upsertDiscoveredAccounts: async () => undefined,
+    markAccountUsed: async () => undefined,
     searchAccounts: async () => [
       {
         domain: "example.com",
@@ -255,11 +295,10 @@ test("falls back to cached rows when live discovery returns nothing", async () =
         lastSeenAt: "2026-04-08T01:00:00.000Z",
       },
     ],
-    close: async () => undefined,
-  };
+  });
 
   const workflow = createPasswordSearchWorkflow({
-    applePw: {
+    applePw: makeApplePwClient({
       listPasswords: async () => ({
         kind: "success",
         payload: [],
@@ -276,7 +315,7 @@ test("falls back to cached rows when live discovery returns nothing", async () =
       execute: async () => {
         throw new Error("not used");
       },
-    },
+    }),
     repository,
   });
 
@@ -288,7 +327,7 @@ test("falls back to cached rows when live discovery returns nothing", async () =
 
 test("prompts for pin when discovery requires auth", async () => {
   const workflow = createPasswordSearchWorkflow({
-    applePw: {
+    applePw: makeApplePwClient({
       listPasswords: async () => ({
         kind: "auth-required",
         prompt: "Enter PIN:",
@@ -305,13 +344,12 @@ test("prompts for pin when discovery requires auth", async () => {
       execute: async () => {
         throw new Error("not used");
       },
-    },
-    repository: {
+    }),
+    repository: makeRepository({
       upsertDiscoveredAccounts: async () => undefined,
       markAccountUsed: async () => undefined,
       searchAccounts: async () => [],
-      close: async () => undefined,
-    },
+    }),
   });
 
   const result = await workflow.search("example.com");
@@ -324,7 +362,7 @@ test("prompts for pin when discovery requires auth", async () => {
 test("retries the original search after pin auth succeeds", async () => {
   const calls: string[] = [];
   const workflow = createPasswordSearchWorkflow({
-    applePw: {
+    applePw: makeApplePwClient({
       listPasswords: async () => {
         calls.push("list");
         if (calls.length === 1) {
@@ -364,9 +402,10 @@ test("retries the original search after pin auth succeeds", async () => {
       execute: async () => {
         throw new Error("not used");
       },
-    },
-    repository: {
+    }),
+    repository: makeRepository({
       upsertDiscoveredAccounts: async () => undefined,
+      markAccountUsed: async () => undefined,
       searchAccounts: async () => [
         {
           domain: "example.com",
@@ -377,8 +416,7 @@ test("retries the original search after pin auth succeeds", async () => {
           lastUsedAt: undefined,
         },
       ],
-      close: async () => undefined,
-    },
+    }),
   });
 
   const pending = await workflow.search("example.com");
@@ -402,7 +440,7 @@ test("fetches password and otp secrets for the selected account", async () => {
   };
 
   const workflow = createPasswordSearchWorkflow({
-    applePw: {
+    applePw: makeApplePwClient({
       listPasswords: async () => ({
         kind: "success",
         payload: [],
@@ -439,15 +477,14 @@ test("fetches password and otp secrets for the selected account", async () => {
       execute: async () => {
         throw new Error("not used");
       },
-    },
-    repository: {
+    }),
+    repository: makeRepository({
       upsertDiscoveredAccounts: async () => undefined,
       markAccountUsed: async (domain: string, username: string) => {
         used.push(`${domain}:${username}`);
       },
       searchAccounts: async () => [],
-      close: async () => undefined,
-    },
+    }),
   });
 
   const passwordOutcome = await workflow.fetchPassword(account);
@@ -465,7 +502,7 @@ test("fetches password and otp secrets for the selected account", async () => {
 test("imports cached accounts and refreshes the current query from sqlite", async () => {
   const upserts: unknown[] = [];
   const workflow = createPasswordSearchWorkflow({
-    applePw: {
+    applePw: makeApplePwClient({
       listPasswords: async () => ({
         kind: "success",
         payload: [],
@@ -482,8 +519,8 @@ test("imports cached accounts and refreshes the current query from sqlite", asyn
       execute: async () => {
         throw new Error("not used");
       },
-    },
-    repository: {
+    }),
+    repository: makeRepository({
       upsertDiscoveredAccounts: async (accounts: unknown[]) => {
         upserts.push(accounts);
       },
@@ -498,8 +535,7 @@ test("imports cached accounts and refreshes the current query from sqlite", asyn
           lastUsedAt: undefined,
         },
       ],
-      close: async () => undefined,
-    },
+    }),
   });
 
   const imported = [

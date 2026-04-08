@@ -93,14 +93,15 @@ CREATE INDEX IF NOT EXISTS idx_accounts_last_used_at ON accounts(last_used_at DE
 
 const SEARCH_CANDIDATE_LIMIT = 200;
 
-let sqlJsPromise: Promise<SqlJsModule> | null = null;
+let sqlJsPromise: Promise<unknown> | null = null;
 
 async function getSqlJs(): Promise<SqlJsModule> {
   if (!sqlJsPromise) {
     sqlJsPromise = initSqlJs();
   }
 
-  return sqlJsPromise;
+  const pendingModule = sqlJsPromise;
+  return (await pendingModule) as SqlJsModule;
 }
 
 async function openDatabase(dbPath: string): Promise<SqlDatabase> {

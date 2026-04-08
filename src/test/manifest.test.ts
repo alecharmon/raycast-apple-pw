@@ -1,10 +1,8 @@
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
+import { resolve } from "node:path";
 import { assert, test } from "./test-harness";
 
-const testDir = dirname(fileURLToPath(import.meta.url));
-const packageJsonPath = resolve(testDir, "../../package.json");
+const packageJsonPath = resolve(process.cwd(), "package.json");
 const manifest = JSON.parse(readFileSync(packageJsonPath, "utf8")) as {
   commands?: Array<{ name: string; mode?: string }>;
   dependencies?: Record<string, string>;

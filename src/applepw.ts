@@ -474,15 +474,18 @@ export async function executeApplePw<T extends object>(args: string[]): Promise<
   return defaultClient.execute<T>(args);
 }
 
-export async function listPasswords(query: string): Promise<ApplePwPasswordEntry[]> {
+export async function listPasswords(query: string): Promise<ApplePwCommandOutcome<ApplePwPasswordEntry[]>> {
   return defaultClient.listPasswords(query);
 }
 
-export async function getPassword(domain: string, username: string): Promise<ApplePwPasswordEntry[]> {
+export async function getPassword(
+  domain: string,
+  username: string,
+): Promise<ApplePwCommandOutcome<ApplePwPasswordEntry[]>> {
   return defaultClient.getPassword(domain, username);
 }
 
-export async function getOtp(domain: string): Promise<ApplePwOtpEntry[]> {
+export async function getOtp(domain: string): Promise<ApplePwCommandOutcome<ApplePwOtpEntry[]>> {
   return defaultClient.getOtp(domain);
 }
 

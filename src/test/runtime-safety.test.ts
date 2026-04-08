@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { strict as assert } from "node:assert";
 import { test } from "./test-harness";
 
-const rootDir = resolve(new URL(".", import.meta.url).pathname, "../../");
+const rootDir = process.cwd();
 const runtimeFiles = ["src/apw.ts", "src/db.ts", "src/applepw.ts"];
 
 test("runtime source files do not depend on import.meta.url", () => {
