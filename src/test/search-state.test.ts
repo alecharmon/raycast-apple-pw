@@ -38,6 +38,7 @@ test("ignores empty search queries without calling applepw", async () => {
     },
     repository: {
       upsertDiscoveredAccounts: async () => undefined,
+      markAccountUsed: async () => undefined,
       searchAccounts: async () => [],
       close: async () => undefined,
     },
@@ -135,6 +136,7 @@ test("keeps the latest auth-required search for pin retry", async () => {
     },
     repository: {
       upsertDiscoveredAccounts: async () => undefined,
+      markAccountUsed: async () => undefined,
       searchAccounts: async () => [],
       close: async () => undefined,
     },
@@ -182,6 +184,7 @@ test("renders cached rows after live discovery upserts accounts", async () => {
         hasOtp: true,
         firstSeenAt: "2026-04-08T00:00:00.000Z",
         lastSeenAt: "2026-04-08T00:00:00.000Z",
+        lastUsedAt: undefined,
       },
     ],
     close: async () => undefined,
@@ -289,6 +292,7 @@ test("prompts for pin when discovery requires auth", async () => {
     },
     repository: {
       upsertDiscoveredAccounts: async () => undefined,
+      markAccountUsed: async () => undefined,
       searchAccounts: async () => [],
       close: async () => undefined,
     },
@@ -354,6 +358,7 @@ test("retries the original search after pin auth succeeds", async () => {
           hasOtp: true,
           firstSeenAt: "2026-04-08T00:00:00.000Z",
           lastSeenAt: "2026-04-08T00:00:00.000Z",
+          lastUsedAt: undefined,
         },
       ],
       close: async () => undefined,
@@ -370,12 +375,14 @@ test("retries the original search after pin auth succeeds", async () => {
 });
 
 test("fetches password and otp secrets for the selected account", async () => {
+  const used: string[] = [];
   const account = {
     domain: "example.com",
     username: "alice@example.com",
     hasOtp: true,
     firstSeenAt: "2026-04-08T00:00:00.000Z",
     lastSeenAt: "2026-04-08T00:00:00.000Z",
+    lastUsedAt: undefined,
   };
 
   const workflow = createPasswordSearchWorkflow({
@@ -419,6 +426,9 @@ test("fetches password and otp secrets for the selected account", async () => {
     },
     repository: {
       upsertDiscoveredAccounts: async () => undefined,
+      markAccountUsed: async (domain: string, username: string) => {
+        used.push(`${domain}:${username}`);
+      },
       searchAccounts: async () => [],
       close: async () => undefined,
     },
@@ -433,6 +443,7 @@ test("fetches password and otp secrets for the selected account", async () => {
   assert.equal(otpOutcome.kind, "secret");
   assert.equal(otpOutcome.action, "otp");
   assert.equal(otpOutcome.value, "123456");
+  assert.deepEqual(used, ["example.com:alice@example.com", "example.com:alice@example.com"]);
 });
 
 test("trims and forwards auth prompt submissions", async () => {

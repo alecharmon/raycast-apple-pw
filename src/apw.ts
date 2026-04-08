@@ -45,7 +45,7 @@ export interface PasswordSearchWorkflow {
 
 export interface PasswordSearchWorkflowOptions {
   applePw: ApplePwClient;
-  repository: Pick<AccountRepository, "upsertDiscoveredAccounts" | "searchAccounts">;
+  repository: Pick<AccountRepository, "upsertDiscoveredAccounts" | "markAccountUsed" | "searchAccounts">;
 }
 
 type UiRuntime = {
@@ -177,6 +177,7 @@ export function createPasswordSearchWorkflow(options: PasswordSearchWorkflowOpti
     }
 
     clearPendingAction(requestId);
+    await repository.markAccountUsed(account.domain, account.username);
     return {
       kind: "secret",
       action: "password",
@@ -195,6 +196,7 @@ export function createPasswordSearchWorkflow(options: PasswordSearchWorkflowOpti
     }
 
     clearPendingAction(requestId);
+    await repository.markAccountUsed(account.domain, account.username);
     return {
       kind: "secret",
       action: "otp",

@@ -17,6 +17,13 @@ test("apw command uses view mode", () => {
   assert.equal(command?.mode, "view");
 });
 
+test("clear-cache command exists", () => {
+  const command = manifest.commands?.find((item) => item.name === "clear-cache");
+
+  assert.ok(command, "clear-cache command should exist");
+  assert.equal(command?.mode, "no-view");
+});
+
 test("sql.js dependency is declared", () => {
   assert.ok(manifest.dependencies?.["sql.js"], "expected sql.js to be declared");
 });

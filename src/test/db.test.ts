@@ -1,7 +1,7 @@
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createAccountRepository } from "../db";
+import { createAccountRepository, resolveAccountDbPath } from "../db";
 import { assert, test } from "./test-harness";
 
 function makeTempDbPath() {
@@ -55,6 +55,12 @@ test("uses support path for the default db location", async () => {
   }
 });
 
+test("resolves db path from support path without opening the database", () => {
+  const { supportPath, dbPath } = makeTempSupportPath();
+
+  assert.equal(resolveAccountDbPath({ supportPath }), dbPath);
+});
+
 test("upserts domain and username rows", async () => {
   await withRepository(async (repository) => {
     await repository.upsertDiscoveredAccounts([
@@ -71,6 +77,7 @@ test("upserts domain and username rows", async () => {
       hasOtp: true,
       firstSeenAt: "2026-04-08T00:00:00.000Z",
       lastSeenAt: "2026-04-08T00:00:00.000Z",
+      lastUsedAt: undefined,
     });
   });
 });
@@ -104,6 +111,26 @@ test("updates last_seen_at on repeated upserts", async () => {
       const rows = await repository.searchAccounts("example.com");
       assert.equal(rows.length, 1);
       assert.equal(rows[0].lastSeenAt, times[1].toISOString());
+    },
+    () => times[Math.min(tick++, times.length - 1)],
+  );
+});
+
+test("records last_used_at when an account is marked used", async () => {
+  let tick = 0;
+  const times = [
+    new Date("2026-04-08T00:00:00.000Z"),
+    new Date("2026-04-08T01:00:00.000Z"),
+  ];
+
+  await withRepository(
+    async (repository) => {
+      await repository.upsertDiscoveredAccounts([{ domain: "example.com", username: "alice@example.com" }]);
+      await repository.markAccountUsed("example.com", "alice@example.com");
+
+      const rows = await repository.searchAccounts("example.com");
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0].lastUsedAt, times[1].toISOString());
     },
     () => times[Math.min(tick++, times.length - 1)],
   );
@@ -192,4 +219,30 @@ test("matches domains with a single missing character", async () => {
     assert.equal(rows.length, 1);
     assert.equal(rows[0].domain, "github.com");
   });
+});
+
+test("prefers recently used matches over never-used matches", async () => {
+  let tick = 0;
+  const times = [
+    new Date("2026-04-08T00:00:00.000Z"),
+    new Date("2026-04-08T01:00:00.000Z"),
+    new Date("2026-04-08T02:00:00.000Z"),
+  ];
+
+  await withRepository(
+    async (repository) => {
+      await repository.upsertDiscoveredAccounts([
+        { domain: "github.com", username: "alice@other.com" },
+        { domain: "github.com", username: "bob@other.com" },
+      ]);
+      await repository.markAccountUsed("github.com", "bob@other.com");
+
+      const rows = await repository.searchAccounts("github.com");
+
+      assert.equal(rows.length, 2);
+      assert.equal(rows[0].username, "bob@other.com");
+      assert.equal(rows[0].lastUsedAt, times[2].toISOString());
+    },
+    () => times[Math.min(tick++, times.length - 1)],
+  );
 });

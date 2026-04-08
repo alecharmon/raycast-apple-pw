@@ -11,6 +11,7 @@ export interface AccountRecord {
   hasOtp: boolean;
   firstSeenAt: string;
   lastSeenAt: string;
+  lastUsedAt?: string;
 }
 
 export interface DiscoveredAccount {
@@ -28,6 +29,7 @@ export interface AccountRepositoryOptions {
 export interface AccountRepository {
   readonly dbPath: string;
   upsertDiscoveredAccounts(accounts: DiscoveredAccount[]): Promise<void>;
+  markAccountUsed(domain: string, username: string): Promise<void>;
   searchAccounts(query: string): Promise<AccountRecord[]>;
   close(): Promise<void>;
 }
@@ -63,6 +65,7 @@ type AccountRow = {
   has_otp: number;
   first_seen_at: string;
   last_seen_at: string;
+  last_used_at: string | null;
 };
 
 type ScoredRow = {
@@ -78,12 +81,14 @@ CREATE TABLE IF NOT EXISTS accounts (
   has_otp INTEGER NOT NULL DEFAULT 0,
   first_seen_at TEXT NOT NULL,
   last_seen_at TEXT NOT NULL,
+  last_used_at TEXT,
   PRIMARY KEY (domain, username)
 );
 
 CREATE INDEX IF NOT EXISTS idx_accounts_username ON accounts(username);
 CREATE INDEX IF NOT EXISTS idx_accounts_domain ON accounts(domain);
 CREATE INDEX IF NOT EXISTS idx_accounts_last_seen_at ON accounts(last_seen_at DESC);
+CREATE INDEX IF NOT EXISTS idx_accounts_last_used_at ON accounts(last_used_at DESC);
 `;
 
 const SEARCH_CANDIDATE_LIMIT = 200;
@@ -207,6 +212,20 @@ function compareIsoDescending(left: string, right: string): number {
   return left > right ? -1 : 1;
 }
 
+function compareOptionalIsoDescending(left?: string | null, right?: string | null): number {
+  if (!left && !right) {
+    return 0;
+  }
+  if (!left) {
+    return 1;
+  }
+  if (!right) {
+    return -1;
+  }
+
+  return compareIsoDescending(left, right);
+}
+
 function scoreCandidate(row: AccountRow, query: string): ScoredRow | null {
   const normalizedQuery = query.trim().toLowerCase();
   if (!normalizedQuery) {
@@ -278,6 +297,7 @@ function toRecord(row: {
   has_otp: number;
   first_seen_at: string;
   last_seen_at: string;
+  last_used_at: string | null;
 }): AccountRecord {
   return {
     domain: row.domain,
@@ -285,11 +305,17 @@ function toRecord(row: {
     hasOtp: row.has_otp === 1,
     firstSeenAt: row.first_seen_at,
     lastSeenAt: row.last_seen_at,
+    lastUsedAt: row.last_used_at ?? undefined,
   };
 }
 
 async function ensureSchema(db: SqlDatabase): Promise<void> {
   db.exec(SCHEMA);
+  const columns = all<{ name: string }>(db, "PRAGMA table_info(accounts)");
+  if (!columns.some((column) => column.name === "last_used_at")) {
+    db.exec("ALTER TABLE accounts ADD COLUMN last_used_at TEXT");
+    db.exec("CREATE INDEX IF NOT EXISTS idx_accounts_last_used_at ON accounts(last_used_at DESC)");
+  }
 }
 
 async function persist(dbPath: string, db: SqlDatabase): Promise<void> {
@@ -312,7 +338,7 @@ async function withTransaction(db: SqlDatabase, action: () => Promise<void>): Pr
   }
 }
 
-function resolveDbPath(options: AccountRepositoryOptions): string {
+export function resolveAccountDbPath(options: AccountRepositoryOptions = {}): string {
   if (options.dbPath?.trim()) {
     return options.dbPath.trim();
   }
@@ -340,7 +366,7 @@ function getRaycastSupportPath(): string | undefined {
 }
 
 export async function createAccountRepository(options: AccountRepositoryOptions = {}): Promise<AccountRepository> {
-  const dbPath = resolveDbPath(options);
+  const dbPath = resolveAccountDbPath(options);
   const now = options.now ?? (() => new Date());
 
   await mkdir(dirname(dbPath), { recursive: true });
@@ -375,6 +401,19 @@ export async function createAccountRepository(options: AccountRepositoryOptions 
       await persist(dbPath, db);
     },
 
+    async markAccountUsed(domain: string, username: string): Promise<void> {
+      await run(
+        db,
+        `
+          UPDATE accounts
+          SET last_used_at = ?
+          WHERE domain = ? AND username = ?
+        `,
+        [now().toISOString(), domain, username],
+      );
+      await persist(dbPath, db);
+    },
+
     async searchAccounts(query: string): Promise<AccountRecord[]> {
       const trimmed = query.trim();
 
@@ -382,7 +421,7 @@ export async function createAccountRepository(options: AccountRepositoryOptions 
         const rows = await all<AccountRow>(
           db,
           `
-            SELECT domain, username, has_otp, first_seen_at, last_seen_at
+            SELECT domain, username, has_otp, first_seen_at, last_seen_at, last_used_at
             FROM accounts
             ORDER BY last_seen_at DESC, domain ASC, username ASC
           `,
@@ -395,7 +434,7 @@ export async function createAccountRepository(options: AccountRepositoryOptions 
       const rows = await all<AccountRow>(
         db,
         `
-          SELECT domain, username, has_otp, first_seen_at, last_seen_at
+          SELECT domain, username, has_otp, first_seen_at, last_seen_at, last_used_at
           FROM accounts
           WHERE domain = ?
              OR domain LIKE ? ESCAPE '\\'
@@ -410,7 +449,7 @@ export async function createAccountRepository(options: AccountRepositoryOptions 
       const fallbackRows = await all<AccountRow>(
         db,
         `
-          SELECT domain, username, has_otp, first_seen_at, last_seen_at
+          SELECT domain, username, has_otp, first_seen_at, last_seen_at, last_used_at
           FROM accounts
           ORDER BY last_seen_at DESC, domain ASC, username ASC
           LIMIT ?
@@ -432,6 +471,10 @@ export async function createAccountRepository(options: AccountRepositoryOptions 
         .map((row) => scoreCandidate(row, trimmed))
         .filter((row): row is ScoredRow => row !== null)
         .sort((left, right) => {
+          const usage = compareOptionalIsoDescending(left.row.last_used_at, right.row.last_used_at);
+          if (usage !== 0) {
+            return usage;
+          }
           if (left.bucket !== right.bucket) {
             return left.bucket - right.bucket;
           }

@@ -20,6 +20,13 @@
       "subtitle": "Apple Password Search",
       "description": "Seach passwords and otp from your apple vault",
       "mode": "view"
+    },
+    {
+      "name": "clear-cache",
+      "title": "clear-cache",
+      "subtitle": "Delete Cached Accounts",
+      "description": "Deletes the local Apple Passwords cache file",
+      "mode": "no-view"
     }
   ],
   "dependencies": {
