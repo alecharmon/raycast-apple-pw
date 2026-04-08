@@ -1,0 +1,167 @@
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createAccountRepository } from "../db";
+import { assert, test } from "./test-harness";
+
+function makeTempDbPath() {
+  const baseDir = mkdtempSync(join(tmpdir(), "applepw-db-"));
+  return {
+    baseDir,
+    dbPath: join(baseDir, "accounts.sqlite3"),
+  };
+}
+
+function makeTempSupportPath() {
+  const baseDir = mkdtempSync(join(tmpdir(), "applepw-support-"));
+  return {
+    baseDir,
+    supportPath: join(baseDir, "support"),
+    dbPath: join(baseDir, "support", "accounts.sqlite3"),
+  };
+}
+
+async function withRepository<T>(
+  fn: (repository: Awaited<ReturnType<typeof createAccountRepository>>, dbPath: string) => Promise<T>,
+  now: () => Date = () => new Date("2026-04-08T00:00:00.000Z"),
+) {
+  const { baseDir, dbPath } = makeTempDbPath();
+  const repository = await createAccountRepository({ dbPath, now });
+
+  try {
+    return await fn(repository, dbPath);
+  } finally {
+    await repository.close();
+    rmSync(baseDir, { recursive: true, force: true });
+  }
+}
+
+test("creates db when missing", async () => {
+  await withRepository(async (_repository, dbPath) => {
+    assert.equal(existsSync(dbPath), true);
+  });
+});
+
+test("uses support path for the default db location", async () => {
+  const { baseDir, supportPath, dbPath } = makeTempSupportPath();
+  const repository = await createAccountRepository({ supportPath, now: () => new Date("2026-04-08T00:00:00.000Z") });
+
+  try {
+    assert.equal(repository.dbPath, dbPath);
+    assert.equal(existsSync(dbPath), true);
+  } finally {
+    await repository.close();
+    rmSync(baseDir, { recursive: true, force: true });
+  }
+});
+
+test("upserts domain and username rows", async () => {
+  await withRepository(async (repository) => {
+    await repository.upsertDiscoveredAccounts([
+      { domain: "example.com", username: "alice@example.com", hasOtp: true },
+      { domain: "example.com", username: "alice@example.com", hasOtp: true },
+    ]);
+
+    const rows = await repository.searchAccounts("example.com");
+
+    assert.equal(rows.length, 1);
+    assert.deepEqual(rows[0], {
+      domain: "example.com",
+      username: "alice@example.com",
+      hasOtp: true,
+      firstSeenAt: "2026-04-08T00:00:00.000Z",
+      lastSeenAt: "2026-04-08T00:00:00.000Z",
+    });
+  });
+});
+
+test("preserves first_seen_at on repeated upserts", async () => {
+  let tick = 0;
+  const times = [new Date("2026-04-08T00:00:00.000Z"), new Date("2026-04-08T01:00:00.000Z")];
+
+  await withRepository(
+    async (repository) => {
+      await repository.upsertDiscoveredAccounts([{ domain: "example.com", username: "alice@example.com" }]);
+      await repository.upsertDiscoveredAccounts([{ domain: "example.com", username: "alice@example.com" }]);
+
+      const rows = await repository.searchAccounts("example.com");
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0].firstSeenAt, times[0].toISOString());
+    },
+    () => times[Math.min(tick++, times.length - 1)],
+  );
+});
+
+test("updates last_seen_at on repeated upserts", async () => {
+  let tick = 0;
+  const times = [new Date("2026-04-08T00:00:00.000Z"), new Date("2026-04-08T01:00:00.000Z")];
+
+  await withRepository(
+    async (repository) => {
+      await repository.upsertDiscoveredAccounts([{ domain: "example.com", username: "alice@example.com" }]);
+      await repository.upsertDiscoveredAccounts([{ domain: "example.com", username: "alice@example.com" }]);
+
+      const rows = await repository.searchAccounts("example.com");
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0].lastSeenAt, times[1].toISOString());
+    },
+    () => times[Math.min(tick++, times.length - 1)],
+  );
+});
+
+test("searches by exact domain", async () => {
+  await withRepository(async (repository) => {
+    await repository.upsertDiscoveredAccounts([
+      { domain: "example.com", username: "alice@other.com" },
+      { domain: "login.example.com", username: "bob@other.com" },
+    ]);
+
+    const rows = await repository.searchAccounts("login.example.com");
+
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].domain, "login.example.com");
+  });
+});
+
+test("searches by domain suffix", async () => {
+  await withRepository(async (repository) => {
+    await repository.upsertDiscoveredAccounts([
+      { domain: "example.com", username: "alice@other.com" },
+      { domain: "login.example.com", username: "bob@other.com" },
+    ]);
+
+    const rows = await repository.searchAccounts("example.com");
+
+    assert.equal(
+      rows.some((row) => row.domain === "login.example.com"),
+      true,
+    );
+  });
+});
+
+test("searches by username fragment", async () => {
+  await withRepository(async (repository) => {
+    await repository.upsertDiscoveredAccounts([
+      { domain: "example.com", username: "alice@other.com" },
+      { domain: "example.org", username: "bob@other.com" },
+    ]);
+
+    const rows = await repository.searchAccounts("ali");
+
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].username, "alice@other.com");
+  });
+});
+
+test("treats wildcard characters in search input literally", async () => {
+  await withRepository(async (repository) => {
+    await repository.upsertDiscoveredAccounts([
+      { domain: "example.com", username: "alice@other.com" },
+      { domain: "other.com", username: "bob@other.com" },
+    ]);
+
+    const rows = await repository.searchAccounts("ali%");
+
+    assert.equal(rows.length, 0);
+  });
+});
