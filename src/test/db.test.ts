@@ -118,10 +118,7 @@ test("updates last_seen_at on repeated upserts", async () => {
 
 test("records last_used_at when an account is marked used", async () => {
   let tick = 0;
-  const times = [
-    new Date("2026-04-08T00:00:00.000Z"),
-    new Date("2026-04-08T01:00:00.000Z"),
-  ];
+  const times = [new Date("2026-04-08T00:00:00.000Z"), new Date("2026-04-08T01:00:00.000Z")];
 
   await withRepository(
     async (repository) => {

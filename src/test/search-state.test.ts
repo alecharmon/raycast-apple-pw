@@ -1,5 +1,21 @@
 import { strict as assert } from "node:assert";
-import { createAuthPromptSubmitActionProps, createPasswordSearchWorkflow } from "../apw";
+import {
+  APPLEPW_INSTALL_COMMAND,
+  createAuthPromptDescriptionProps,
+  createAuthPromptFieldProps,
+  createImportCsvPickerProps,
+  createAuthPromptSubmitActionProps,
+  createImportCsvDescriptionProps,
+  createImportCsvSubmitActionProps,
+  createMissingBinaryMarkdown,
+  createPasswordSearchWorkflow,
+  isMissingApplePwBinaryError,
+  loadPasswordsCsv,
+  parsePasswordsCsv,
+} from "../apw";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "./test-harness";
 
 function deferred<T>() {
@@ -446,6 +462,60 @@ test("fetches password and otp secrets for the selected account", async () => {
   assert.deepEqual(used, ["example.com:alice@example.com", "example.com:alice@example.com"]);
 });
 
+test("imports cached accounts and refreshes the current query from sqlite", async () => {
+  const upserts: unknown[] = [];
+  const workflow = createPasswordSearchWorkflow({
+    applePw: {
+      listPasswords: async () => ({
+        kind: "success",
+        payload: [],
+        stdout: "",
+        stderr: "",
+      }),
+      getPassword: async () => {
+        throw new Error("not used");
+      },
+      getOtp: async () => {
+        throw new Error("not used");
+      },
+      authenticate: async () => ({ status: 0 }),
+      execute: async () => {
+        throw new Error("not used");
+      },
+    },
+    repository: {
+      upsertDiscoveredAccounts: async (accounts: unknown[]) => {
+        upserts.push(accounts);
+      },
+      markAccountUsed: async () => undefined,
+      searchAccounts: async (query: string) => [
+        {
+          domain: query,
+          username: "imported@example.com",
+          hasOtp: true,
+          firstSeenAt: "2026-04-08T00:00:00.000Z",
+          lastSeenAt: "2026-04-08T01:00:00.000Z",
+          lastUsedAt: undefined,
+        },
+      ],
+      close: async () => undefined,
+    },
+  });
+
+  const imported = [
+    {
+      domain: "example.com",
+      username: "imported@example.com",
+      hasOtp: true,
+    },
+  ];
+  const result = await workflow.importAccounts(imported, "example.com");
+
+  assert.equal(result.kind, "results");
+  assert.deepEqual(upserts, [imported]);
+  assert.equal(result.rows[0].domain, "example.com");
+});
+
 test("trims and forwards auth prompt submissions", async () => {
   const submissions: string[] = [];
   const props = createAuthPromptSubmitActionProps(async (pin: string) => {
@@ -457,4 +527,124 @@ test("trims and forwards auth prompt submissions", async () => {
   await props.onSubmit({ pin: " 123456 " });
 
   assert.deepEqual(submissions, ["123456"]);
+});
+
+test("trims and forwards csv import submissions", async () => {
+  const submissions: string[] = [];
+  const props = createImportCsvSubmitActionProps(async (filePath: string) => {
+    submissions.push(filePath);
+  });
+
+  assert.equal(typeof props.onSubmit, "function");
+
+  await props.onSubmit({ filePath: [" /Users/test/Passwords.csv "] });
+
+  assert.deepEqual(submissions, ["/Users/test/Passwords.csv"]);
+});
+
+test("uses a plain code field for auth entry", () => {
+  const props = createAuthPromptFieldProps();
+
+  assert.deepEqual(props, {
+    id: "pin",
+    title: "Code",
+    placeholder: "Enter your Apple Passwords code",
+    autoFocus: true,
+  });
+});
+
+test("uses setup-style auth description copy", () => {
+  const props = createAuthPromptDescriptionProps("Apple Passwords needs authentication before searching.");
+
+  assert.deepEqual(props, {
+    title: "Unlock Apple Passwords",
+    text: "Apple Passwords needs authentication before searching.",
+  });
+});
+
+test("uses setup-style csv import description copy", () => {
+  const props = createImportCsvDescriptionProps();
+
+  assert.deepEqual(props, {
+    title: "Import Search Cache",
+    text: [
+      "1. Open the Apple Passwords app.",
+      "2. Choose File > Export All Passwords to File.",
+      "3. Select that CSV here to import it into the password cache.",
+      "",
+      "This only imports website, username, and OTP metadata. Password values are ignored and are not written to the password cache.",
+    ].join("\n"),
+  });
+});
+
+test("uses a single-file csv picker with no initial selection", () => {
+  const props = createImportCsvPickerProps();
+
+  assert.deepEqual(props, {
+    id: "filePath",
+    title: "CSV File",
+    defaultValue: undefined,
+    allowMultipleSelection: false,
+    canChooseFiles: true,
+    canChooseDirectories: false,
+    autoFocus: true,
+  });
+});
+
+test("parses importable accounts from apple passwords csv", () => {
+  const csv = [
+    "Title,URL,Username,Password,Notes,OTPAuth",
+    '"GitHub","https://github.com/login","alice@example.com","secret","",',
+    '"Google","https://accounts.google.com/","alice@example.com","secret","","otpauth://totp/test"',
+    '"Duplicate","https://accounts.google.com/","alice@example.com","secret","",',
+    '"Invalid","not-a-url","nobody@example.com","secret","",',
+  ].join("\n");
+
+  assert.deepEqual(parsePasswordsCsv(csv), [
+    {
+      domain: "github.com",
+      username: "alice@example.com",
+      hasOtp: false,
+    },
+    {
+      domain: "accounts.google.com",
+      username: "alice@example.com",
+      hasOtp: true,
+    },
+  ]);
+});
+
+test("loads accounts from a csv file on disk", async () => {
+  const baseDir = mkdtempSync(join(tmpdir(), "applepw-csv-"));
+  const filePath = join(baseDir, "Passwords.csv");
+  writeFileSync(
+    filePath,
+    "Title,URL,Username,Password,Notes,OTPAuth\nGitHub,https://github.com/,alice@example.com,secret,,\n",
+  );
+
+  try {
+    const accounts = await loadPasswordsCsv(filePath);
+
+    assert.deepEqual(accounts, [
+      {
+        domain: "github.com",
+        username: "alice@example.com",
+        hasOtp: false,
+      },
+    ]);
+  } finally {
+    rmSync(baseDir, { recursive: true, force: true });
+  }
+});
+
+test("detects missing applepw binary errors", () => {
+  assert.equal(isMissingApplePwBinaryError(new Error('Unable to locate applepw binary. Tried: "applepw"')), true);
+  assert.equal(isMissingApplePwBinaryError(new Error("some other error")), false);
+});
+
+test("renders setup markdown for missing applepw", () => {
+  const markdown = createMissingBinaryMarkdown();
+
+  assert.equal(markdown.includes("Install Apple Passwords CLI"), true);
+  assert.equal(markdown.includes(APPLEPW_INSTALL_COMMAND), true);
 });

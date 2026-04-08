@@ -276,3 +276,28 @@ test("authenticate tolerates non-json log lines before the json status", async (
 
   assert.deepEqual(result, { status: 0 });
 });
+
+test("getStatus exposes the status payload", async () => {
+  const client = createApplePwClient({
+    runner: async () => ({
+      stdout: JSON.stringify({
+        status: "ready",
+        daemon: "running",
+        authenticated: true,
+      }),
+      stderr: "",
+      exitCode: 0,
+      signal: null,
+    }),
+    binaryPath: "/bin/applepw",
+  });
+
+  const result = await client.getStatus();
+
+  assert.equal(result.kind, "success");
+  assert.deepEqual(result.payload, {
+    status: "ready",
+    daemon: "running",
+    authenticated: true,
+  });
+});

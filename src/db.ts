@@ -250,7 +250,10 @@ function scoreCandidate(row: AccountRow, query: string): ScoredRow | null {
     return { row, bucket: 1, strength: 0 };
   }
 
-  if (queryTokens.length > 0 && queryTokens.every((token) => domainTokens.some((candidate) => candidate.startsWith(token)))) {
+  if (
+    queryTokens.length > 0 &&
+    queryTokens.every((token) => domainTokens.some((candidate) => candidate.startsWith(token)))
+  ) {
     return { row, bucket: 2, strength: normalizedQuery.length * -1 };
   }
 

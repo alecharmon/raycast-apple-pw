@@ -82,7 +82,14 @@ export interface ApplePwOtpEntry {
   code: string;
 }
 
+export interface ApplePwStatus {
+  status: "ready" | "daemon_stopped" | "daemon_unresponsive" | "unauthenticated";
+  daemon: "running" | "stopped" | "unresponsive";
+  authenticated: boolean;
+}
+
 export interface ApplePwClient {
+  getStatus(): Promise<ApplePwCommandOutcome<ApplePwStatus>>;
   listPasswords(query: string): Promise<ApplePwCommandOutcome<ApplePwPasswordEntry[]>>;
   getPassword(domain: string, username: string): Promise<ApplePwCommandOutcome<ApplePwPasswordEntry[]>>;
   getOtp(domain: string): Promise<ApplePwCommandOutcome<ApplePwOtpEntry[]>>;
@@ -134,6 +141,10 @@ export function resolveApplePwBinaryCandidates(options: ApplePwBinaryResolutionO
   }
 
   return ["applepw", ...COMMON_BINARY_PATHS, options.repoFallbackPath ?? DEFAULT_REPO_BINARY_PATH];
+}
+
+function debugLog(event: string, details: Record<string, unknown>) {
+  console.log(`[applepw-raycast] ${event}`, JSON.stringify(details));
 }
 
 function createDefaultRunner(commandCandidates: string[]): ApplePwRunner {
@@ -316,6 +327,10 @@ function buildChallengeArgs(): string[] {
   return ["auth", "request"];
 }
 
+function buildStatusArgs(): string[] {
+  return ["status"];
+}
+
 function buildListArgs(query: string): string[] {
   return ["pw", "list", query];
 }
@@ -345,7 +360,16 @@ export function createApplePwClient(options: ApplePwClientOptions = {}): ApplePw
   const binaryPath = binaryCandidates[0];
 
   async function execute<T extends object>(args: string[]): Promise<ApplePwCommandOutcome<T>> {
+    debugLog("applepw.execute.start", { binaryPath, args });
     const result = await runner(binaryPath, args);
+    debugLog("applepw.execute.result", {
+      binaryPath,
+      args,
+      exitCode: result.exitCode,
+      signal: result.signal,
+      stdout: result.stdout,
+      stderr: result.stderr,
+    });
     return buildCommandOutcome<T>(result, binaryPath, args);
   }
 
@@ -398,9 +422,16 @@ export function createApplePwClient(options: ApplePwClientOptions = {}): ApplePw
   async function getPassword(domain: string, username: string): Promise<ApplePwCommandOutcome<ApplePwPasswordEntry[]>> {
     const response = await execute<ApplePwJsonPayload<ApplePwPasswordEntry>>(buildPasswordArgs(domain, username));
     if (response.kind === "auth-required") {
+      debugLog("applepw.getPassword.auth_required", { domain, username });
       return response;
     }
 
+    debugLog("applepw.getPassword.success", {
+      domain,
+      username,
+      resultCount: normalizeResults(response.payload?.results).length,
+      payload: response.payload,
+    });
     return {
       kind: "success",
       payload: normalizeResults(response.payload?.results),
@@ -423,7 +454,12 @@ export function createApplePwClient(options: ApplePwClientOptions = {}): ApplePw
     };
   }
 
+  async function getStatus(): Promise<ApplePwCommandOutcome<ApplePwStatus>> {
+    return await execute<ApplePwStatus>(buildStatusArgs());
+  }
+
   return {
+    getStatus,
     listPasswords,
     getPassword,
     getOtp,

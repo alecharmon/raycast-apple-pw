@@ -1,31 +1,31 @@
 {
   "$schema": "https://www.raycast.com/schemas/extension.json",
   "name": "apple-passwords",
-  "title": "Apple Passwords",
-  "description": "Uses a bridge to conenct to your apple passwords vault locally and quickly search for passwords and otp codes. Everything is kept locally.",
-  "icon": "extension-icon.png",
-  "author": "Alec-bb",
+  "title": "Apple Password",
+  "description": "Search Apple Passwords and copy passwords or one-time codes from your local vault.",
+  "icon": "icon.png",
+  "author": "alec-harmon",
   "platforms": [
-    "macOS",
-    "Windows"
+    "macOS"
   ],
   "categories": [
+    "Security",
     "Productivity"
   ],
   "license": "MIT",
   "commands": [
     {
       "name": "apw",
-      "title": "apw",
-      "subtitle": "Apple Password Search",
-      "description": "Seach passwords and otp from your apple vault",
+      "title": "Search Passwords",
+      "subtitle": "Apple Password",
+      "description": "Search Apple Passwords and copy passwords or one-time codes",
       "mode": "view"
     },
     {
       "name": "clear-cache",
-      "title": "clear-cache",
-      "subtitle": "Delete Cached Accounts",
-      "description": "Deletes the local Apple Passwords cache file",
+      "title": "Clear Password Cache",
+      "subtitle": "Apple Password",
+      "description": "Delete the local Apple Password cache file",
       "mode": "no-view"
     }
   ],

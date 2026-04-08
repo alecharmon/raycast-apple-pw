@@ -1,4 +1,5 @@
 import { createRequire } from "node:module";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import React, { useEffect, useRef, useState } from "react";
 import {
@@ -8,7 +9,7 @@ import {
   type ApplePwOtpEntry,
   type ApplePwPasswordEntry,
 } from "./applepw";
-import { createAccountRepository, type AccountRecord, type AccountRepository } from "./db";
+import { createAccountRepository, type AccountRecord, type AccountRepository, type DiscoveredAccount } from "./db";
 
 type PendingAction =
   | { kind: "search"; query: string }
@@ -40,6 +41,7 @@ export interface PasswordSearchWorkflow {
   search(query: string): Promise<PasswordSearchOutcome>;
   fetchPassword(account: AccountRecord): Promise<PasswordSearchOutcome>;
   fetchOtp(account: AccountRecord): Promise<PasswordSearchOutcome>;
+  importAccounts(accounts: DiscoveredAccount[], query: string): Promise<SearchResultsOutcome>;
   submitPin(pin: string): Promise<PasswordSearchOutcome>;
 }
 
@@ -52,10 +54,12 @@ type UiRuntime = {
   Action: typeof import("@raycast/api").Action;
   ActionPanel: typeof import("@raycast/api").ActionPanel;
   Clipboard: typeof import("@raycast/api").Clipboard;
+  Detail: typeof import("@raycast/api").Detail;
   Form: typeof import("@raycast/api").Form;
   Icon: typeof import("@raycast/api").Icon;
   List: typeof import("@raycast/api").List;
   Toast: typeof import("@raycast/api").Toast;
+  popToRoot: typeof import("@raycast/api").popToRoot;
   showHUD: typeof import("@raycast/api").showHUD;
   showToast: typeof import("@raycast/api").showToast;
 };
@@ -63,6 +67,7 @@ type UiRuntime = {
 const require = createRequire(join(process.cwd(), "package.json"));
 const defaultApplePwClient = createApplePwClient();
 let uiRuntime: UiRuntime | null = null;
+export const APPLEPW_INSTALL_COMMAND = "brew install alecharmon/tap/applepw";
 
 function getUiRuntime(): UiRuntime {
   if (uiRuntime) {
@@ -74,14 +79,20 @@ function getUiRuntime(): UiRuntime {
     Action: api.Action,
     ActionPanel: api.ActionPanel,
     Clipboard: api.Clipboard,
+    Detail: api.Detail,
     Form: api.Form,
     Icon: api.Icon,
     List: api.List,
     Toast: api.Toast,
+    popToRoot: api.popToRoot,
     showHUD: api.showHUD,
     showToast: api.showToast,
   };
   return uiRuntime;
+}
+
+function debugLog(event: string, details: Record<string, unknown>) {
+  console.log(`[applepw-raycast] ${event}`, JSON.stringify(details));
 }
 
 function mapPasswordEntries(entries: ApplePwPasswordEntry[]) {
@@ -117,6 +128,129 @@ function outcomeFromAuthRequired(prompt: string, pendingAction: PendingAction): 
     prompt,
     pendingAction,
   };
+}
+
+function normalizeImportedHostname(url: string): string | null {
+  try {
+    const hostname = new URL(url).hostname.trim().replace(/\.$/, "").toLowerCase();
+    return hostname || null;
+  } catch {
+    return null;
+  }
+}
+
+function parseCsvRows(csv: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = "";
+  let inQuotes = false;
+
+  for (let index = 0; index < csv.length; index += 1) {
+    const character = csv[index];
+
+    if (inQuotes) {
+      if (character === '"') {
+        if (csv[index + 1] === '"') {
+          field += '"';
+          index += 1;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        field += character;
+      }
+      continue;
+    }
+
+    if (character === '"') {
+      inQuotes = true;
+      continue;
+    }
+
+    if (character === ",") {
+      row.push(field);
+      field = "";
+      continue;
+    }
+
+    if (character === "\r" || character === "\n") {
+      row.push(field);
+      rows.push(row);
+      row = [];
+      field = "";
+
+      if (character === "\r" && csv[index + 1] === "\n") {
+        index += 1;
+      }
+      continue;
+    }
+
+    field += character;
+  }
+
+  if (field.length > 0 || row.length > 0) {
+    row.push(field);
+    rows.push(row);
+  }
+
+  return rows;
+}
+
+export function parsePasswordsCsv(csv: string): DiscoveredAccount[] {
+  const rows = parseCsvRows(csv);
+  if (rows.length === 0) {
+    return [];
+  }
+
+  const header = rows[0].map((value) =>
+    value
+      .trim()
+      .replace(/^\uFEFF/, "")
+      .toLowerCase(),
+  );
+  const urlIndex = header.indexOf("url");
+  const usernameIndex = header.indexOf("username");
+  const otpAuthIndex = header.indexOf("otpauth");
+
+  if (urlIndex === -1 || usernameIndex === -1) {
+    throw new Error("CSV must include URL and Username columns");
+  }
+
+  const accounts = new Map<string, DiscoveredAccount>();
+  for (const row of rows.slice(1)) {
+    const username = row[usernameIndex]?.trim();
+    const domain = normalizeImportedHostname(row[urlIndex] ?? "");
+
+    if (!domain || !username) {
+      continue;
+    }
+
+    const key = `${domain}\u0000${username}`;
+    const hasOtp = Boolean(row[otpAuthIndex]?.trim());
+    const existing = accounts.get(key);
+
+    if (existing) {
+      existing.hasOtp = existing.hasOtp || hasOtp;
+      continue;
+    }
+
+    accounts.set(key, {
+      domain,
+      username,
+      hasOtp,
+    });
+  }
+
+  return [...accounts.values()];
+}
+
+export async function loadPasswordsCsv(filePath: string): Promise<DiscoveredAccount[]> {
+  const csv = await readFile(filePath, "utf8");
+  const accounts = parsePasswordsCsv(csv);
+  if (accounts.length === 0) {
+    throw new Error("No importable accounts were found in that CSV file");
+  }
+  return accounts;
 }
 
 export function createPasswordSearchWorkflow(options: PasswordSearchWorkflowOptions): PasswordSearchWorkflow {
@@ -169,20 +303,45 @@ export function createPasswordSearchWorkflow(options: PasswordSearchWorkflowOpti
 
   async function runPassword(account: AccountRecord): Promise<PasswordSearchOutcome> {
     const requestId = ++activeRequestId;
+    debugLog("workflow.fetchPassword.start", {
+      requestId,
+      domain: account.domain,
+      username: account.username,
+      hasOtp: account.hasOtp,
+    });
     const result = await applePw.getPassword(account.domain, account.username);
     if (result.kind === "auth-required") {
       const action = { kind: "password", account } as PendingAction;
       setPendingAction(requestId, action);
+      debugLog("workflow.fetchPassword.auth_required", {
+        requestId,
+        domain: account.domain,
+        username: account.username,
+      });
       return outcomeFromAuthRequired(result.prompt, action);
     }
 
+    debugLog("workflow.fetchPassword.result", {
+      requestId,
+      domain: account.domain,
+      username: account.username,
+      resultCount: result.payload.length,
+      firstResult: result.payload[0],
+    });
     clearPendingAction(requestId);
     await repository.markAccountUsed(account.domain, account.username);
+    const value = selectPasswordValue(result);
+    debugLog("workflow.fetchPassword.value_selected", {
+      requestId,
+      domain: account.domain,
+      username: account.username,
+      valueLength: value.length,
+    });
     return {
       kind: "secret",
       action: "password",
       account,
-      value: selectPasswordValue(result),
+      value,
     };
   }
 
@@ -228,19 +387,48 @@ export function createPasswordSearchWorkflow(options: PasswordSearchWorkflowOpti
     search: runSearch,
     fetchPassword: runPassword,
     fetchOtp: runOtp,
+    importAccounts: async (accounts: DiscoveredAccount[], query: string) => {
+      const requestId = ++activeRequestId;
+      await repository.upsertDiscoveredAccounts(accounts);
+      const trimmedQuery = query.trim();
+      const rows = trimmedQuery ? await repository.searchAccounts(trimmedQuery) : [];
+      clearPendingAction(requestId);
+
+      return {
+        kind: "results",
+        query: trimmedQuery,
+        rows,
+      };
+    },
     submitPin,
   };
 }
 
 async function copySecretAndNotify(outcome: SecretOutcome): Promise<void> {
   const ui = getUiRuntime();
+  debugLog("ui.copySecret.start", {
+    action: outcome.action,
+    domain: outcome.account.domain,
+    username: outcome.account.username,
+    valueLength: outcome.value.length,
+  });
   await ui.Clipboard.copy(outcome.value, { concealed: true });
   await ui.showHUD(outcome.action === "password" ? "Password copied" : "2FA code copied");
+  debugLog("ui.copySecret.success", {
+    action: outcome.action,
+    domain: outcome.account.domain,
+    username: outcome.account.username,
+  });
 }
 
 async function presentError(error: unknown): Promise<void> {
   const ui = getUiRuntime();
   const message = error instanceof Error ? error.message : "Unknown error";
+  debugLog("ui.error", {
+    message,
+    name: error instanceof Error ? error.name : undefined,
+    stack: error instanceof Error ? error.stack : undefined,
+  });
   await ui.showToast({
     style: ui.Toast.Style.Failure,
     title: "Apple Passwords",
@@ -252,10 +440,12 @@ function SecretActionListItem({
   account,
   onPassword,
   onOtp,
+  onImportCsv,
 }: {
   account: AccountRecord;
   onPassword: (account: AccountRecord) => Promise<void>;
   onOtp: (account: AccountRecord) => Promise<void>;
+  onImportCsv: (filePath: string) => Promise<void>;
 }) {
   const ui = getUiRuntime();
   const h = React.createElement;
@@ -278,6 +468,7 @@ function SecretActionListItem({
         onAction: () => void onOtp(account),
         isDisabled: !account.hasOtp,
       }),
+      createImportCsvAction(onImportCsv),
     ),
   });
 }
@@ -289,31 +480,147 @@ export function AuthPromptForm({ prompt, onSubmit }: { prompt: string; onSubmit:
   return h(
     ui.Form,
     {
-      actions: h(
-        ui.ActionPanel,
-        null,
-        h(ui.Action.SubmitForm, createAuthPromptSubmitActionProps(onSubmit)),
-      ),
+      actions: h(ui.ActionPanel, null, h(ui.Action.SubmitForm, createAuthPromptSubmitActionProps(onSubmit))),
     },
-    h(ui.Form.Description, {
-      title: "Authentication Required",
-      text: prompt,
-    }),
-    h(ui.Form.PasswordField, {
-      id: "pin",
-      title: "Activation Code",
-      placeholder: "Enter the code from Apple Passwords",
-    }),
+    h(ui.Form.Description, createAuthPromptDescriptionProps(prompt)),
+    h(ui.Form.TextField, createAuthPromptFieldProps()),
   );
 }
 
 export function createAuthPromptSubmitActionProps(onSubmit: (pin: string) => Promise<void>) {
   return {
-    title: "Submit Activation Code",
+    title: "Continue",
     onSubmit: async (values: { pin?: string }) => {
       await onSubmit(values.pin?.trim() ?? "");
     },
   };
+}
+
+export function createAuthPromptFieldProps() {
+  return {
+    id: "pin",
+    title: "Code",
+    placeholder: "Enter your Apple Passwords code",
+    autoFocus: true,
+  };
+}
+
+export function createAuthPromptDescriptionProps(prompt: string) {
+  return {
+    title: "Unlock Apple Passwords",
+    text: prompt,
+  };
+}
+
+export function isMissingApplePwBinaryError(error: unknown): boolean {
+  return error instanceof Error && error.message.includes("Unable to locate applepw binary");
+}
+
+export function createMissingBinaryMarkdown() {
+  return [
+    "# Install Apple Passwords CLI",
+    "",
+    "This command needs the local `applepw` CLI before it can search your Apple Passwords cache.",
+    "",
+    "## Install",
+    "",
+    "```bash",
+    APPLEPW_INSTALL_COMMAND,
+    "```",
+    "",
+    "After installing, reopen the command and authenticate.",
+  ].join("\n");
+}
+
+function MissingBinaryView() {
+  const ui = getUiRuntime();
+  const h = React.createElement;
+
+  return h(ui.Detail, {
+    markdown: createMissingBinaryMarkdown(),
+    actions: h(
+      ui.ActionPanel,
+      null,
+      h(ui.Action.CopyToClipboard, {
+        title: "Copy Install Command",
+        content: APPLEPW_INSTALL_COMMAND,
+      }),
+      h(ui.Action.Open, {
+        title: "Open Terminal",
+        target: "/System/Applications/Utilities/Terminal.app",
+      }),
+    ),
+  });
+}
+
+export function createImportCsvDescriptionProps() {
+  return {
+    title: "Import Search Cache",
+    text: [
+      "1. Open the Apple Passwords app.",
+      "2. Choose File > Export All Passwords to File.",
+      "3. Select that CSV here to import it into the password cache.",
+      "",
+      "This only imports website, username, and OTP metadata. Password values are ignored and are not written to the password cache.",
+    ].join("\n"),
+  };
+}
+
+export function createImportCsvPickerProps(defaultValue?: string) {
+  return {
+    id: "filePath",
+    title: "CSV File",
+    defaultValue: defaultValue ? [defaultValue] : undefined,
+    allowMultipleSelection: false,
+    canChooseFiles: true,
+    canChooseDirectories: false,
+    autoFocus: true,
+  };
+}
+
+export function createImportCsvSubmitActionProps(onSubmit: (filePath: string) => Promise<void>) {
+  return {
+    title: "Continue",
+    onSubmit: async (values: { filePath?: string[] }) => {
+      await onSubmit(values.filePath?.[0]?.trim() ?? "");
+    },
+  };
+}
+
+function ImportCsvForm({ onSubmit }: { onSubmit: (filePath: string) => Promise<void> }) {
+  const ui = getUiRuntime();
+  const h = React.createElement;
+
+  return h(
+    ui.Form,
+    {
+      actions: h(ui.ActionPanel, null, h(ui.Action.SubmitForm, createImportCsvSubmitActionProps(onSubmit))),
+    },
+    h(ui.Form.Description, createImportCsvDescriptionProps()),
+    h(ui.Form.FilePicker, createImportCsvPickerProps()),
+  );
+}
+
+function createImportCsvAction(onSubmit: (filePath: string) => Promise<void>) {
+  const ui = getUiRuntime();
+  const h = React.createElement;
+
+  return h(ui.Action.Push, {
+    title: "Import CSV Cache",
+    icon: ui.Icon.Download,
+    target: h(ImportCsvForm, { onSubmit }),
+  });
+}
+
+function createRetrySearchAction(onAction: () => Promise<void>) {
+  const ui = getUiRuntime();
+  const h = React.createElement;
+
+  return h(ui.Action, {
+    title: "Retry Search",
+    icon: ui.Icon.ArrowClockwise,
+    onAction: () => void onAction(),
+  });
 }
 
 export default function Command() {
@@ -321,6 +628,7 @@ export default function Command() {
   const [query, setQuery] = useState("");
   const [rows, setRows] = useState<AccountRecord[]>([]);
   const [authPrompt, setAuthPrompt] = useState<string | null>(null);
+  const [missingBinary, setMissingBinary] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const requestIdRef = useRef(0);
 
@@ -336,15 +644,31 @@ export default function Command() {
         }
 
         activeRepository = created;
-        setWorkflow(
-          createPasswordSearchWorkflow({
-            applePw: defaultApplePwClient,
-            repository: created,
-          }),
-        );
-        setIsLoading(false);
+        return defaultApplePwClient.getStatus().then((statusOutcome) => {
+          if (cancelled) {
+            void created.close();
+            return;
+          }
+
+          if (statusOutcome.kind === "success" && statusOutcome.payload.status !== "ready") {
+            setAuthPrompt("Apple Passwords needs authentication before searching.");
+          }
+
+          setWorkflow(
+            createPasswordSearchWorkflow({
+              applePw: defaultApplePwClient,
+              repository: created,
+            }),
+          );
+          setIsLoading(false);
+        });
       })
       .catch(async (error) => {
+        if (isMissingApplePwBinaryError(error)) {
+          setMissingBinary(true);
+          setIsLoading(false);
+          return;
+        }
         setIsLoading(false);
         await presentError(error);
       });
@@ -357,12 +681,12 @@ export default function Command() {
     };
   }, []);
 
-  useEffect(() => {
+  const runSearch = async (rawQuery: string) => {
     if (!workflow) {
       return;
     }
 
-    const trimmedQuery = query.trim();
+    const trimmedQuery = rawQuery.trim();
     if (!trimmedQuery) {
       requestIdRef.current += 1;
       setRows([]);
@@ -376,7 +700,7 @@ export default function Command() {
     setAuthPrompt(null);
     setIsLoading(true);
 
-    void workflow
+    await workflow
       .search(trimmedQuery)
       .then((outcome) => {
         if (requestId !== requestIdRef.current) {
@@ -394,7 +718,11 @@ export default function Command() {
         if (requestId !== requestIdRef.current) {
           return;
         }
-
+        if (isMissingApplePwBinaryError(error)) {
+          setMissingBinary(true);
+          setIsLoading(false);
+          return;
+        }
         await presentError(error);
       })
       .finally(() => {
@@ -402,6 +730,14 @@ export default function Command() {
           setIsLoading(false);
         }
       });
+  };
+
+  useEffect(() => {
+    if (!workflow) {
+      return;
+    }
+
+    void runSearch(query);
   }, [query, workflow]);
 
   const handlePassword = async (account: AccountRecord) => {
@@ -420,6 +756,10 @@ export default function Command() {
       setAuthPrompt(null);
       await copySecretAndNotify(outcome);
     } catch (error) {
+      if (isMissingApplePwBinaryError(error)) {
+        setMissingBinary(true);
+        return;
+      }
       await presentError(error);
     } finally {
       setIsLoading(false);
@@ -442,6 +782,10 @@ export default function Command() {
       setAuthPrompt(null);
       await copySecretAndNotify(outcome);
     } catch (error) {
+      if (isMissingApplePwBinaryError(error)) {
+        setMissingBinary(true);
+        return;
+      }
       await presentError(error);
     } finally {
       setIsLoading(false);
@@ -466,11 +810,49 @@ export default function Command() {
         setAuthPrompt(outcome.prompt);
       }
     } catch (error) {
+      if (isMissingApplePwBinaryError(error)) {
+        setMissingBinary(true);
+        return;
+      }
       await presentError(error);
     } finally {
       setIsLoading(false);
     }
   };
+
+  const handleCsvImport = async (filePath: string) => {
+    if (!workflow) {
+      return;
+    }
+
+    const trimmedPath = filePath.trim();
+    if (!trimmedPath) {
+      await presentError(new Error("Enter a CSV file path"));
+      return;
+    }
+
+    setIsLoading(true);
+    try {
+      const accounts = await loadPasswordsCsv(trimmedPath);
+      const outcome = await workflow.importAccounts(accounts, query);
+      setRows(outcome.rows);
+      setAuthPrompt(null);
+      await getUiRuntime().popToRoot();
+      await getUiRuntime().showHUD(`Imported ${accounts.length} cached accounts`);
+    } catch (error) {
+      await presentError(error);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleRetrySearch = async () => {
+    await runSearch(query);
+  };
+
+  if (missingBinary) {
+    return React.createElement(MissingBinaryView);
+  }
 
   if (authPrompt) {
     return React.createElement(AuthPromptForm, { prompt: authPrompt, onSubmit: handlePinSubmit });
@@ -496,7 +878,6 @@ export default function Command() {
           title: "Search your passwords",
           description: "Type a domain or email fragment to sync from Apple Passwords.",
         };
-
   return h(
     ui.List,
     {
@@ -505,13 +886,24 @@ export default function Command() {
       onSearchTextChange: setQuery,
     },
     rows.length === 0
-      ? h(ui.List.EmptyView, emptyState)
+      ? h(ui.List.EmptyView, {
+          ...emptyState,
+          actions: trimmedQuery
+            ? h(
+                ui.ActionPanel,
+                null,
+                createRetrySearchAction(handleRetrySearch),
+                createImportCsvAction(handleCsvImport),
+              )
+            : undefined,
+        })
       : rows.map((account) =>
           h(SecretActionListItem, {
             key: `${account.domain}:${account.username}`,
             account,
             onPassword: handlePassword,
             onOtp: handleOtp,
+            onImportCsv: handleCsvImport,
           }),
         ),
   );

@@ -7,7 +7,8 @@ export default async function Command() {
 
   const confirmed = await confirmAlert({
     title: "Clear Apple Passwords Cache?",
-    message: "This deletes the local cached accounts database file. The next search will rebuild it from Apple Passwords.",
+    message:
+      "This deletes the local cached accounts database file. The next search will rebuild it from Apple Passwords.",
     primaryAction: {
       title: "Delete Cache",
       style: Alert.ActionStyle.Destructive,
