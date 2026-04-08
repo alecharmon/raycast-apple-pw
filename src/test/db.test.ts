@@ -165,3 +165,31 @@ test("treats wildcard characters in search input literally", async () => {
     assert.equal(rows.length, 0);
   });
 });
+
+test("prefers exact domain matches over username-only matches", async () => {
+  await withRepository(async (repository) => {
+    await repository.upsertDiscoveredAccounts([
+      { domain: "other.com", username: "github.com@user.test" },
+      { domain: "github.com", username: "alice@other.com" },
+    ]);
+
+    const rows = await repository.searchAccounts("github.com");
+
+    assert.equal(rows.length, 2);
+    assert.equal(rows[0].domain, "github.com");
+  });
+});
+
+test("matches domains with a single missing character", async () => {
+  await withRepository(async (repository) => {
+    await repository.upsertDiscoveredAccounts([
+      { domain: "github.com", username: "alice@github.com" },
+      { domain: "gitlab.com", username: "bob@gitlab.com" },
+    ]);
+
+    const rows = await repository.searchAccounts("githb.com");
+
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].domain, "github.com");
+  });
+});

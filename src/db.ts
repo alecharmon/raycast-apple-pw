@@ -57,6 +57,20 @@ interface SqlJsModule {
   Database: new (data?: Uint8Array) => SqlDatabase;
 }
 
+type AccountRow = {
+  domain: string;
+  username: string;
+  has_otp: number;
+  first_seen_at: string;
+  last_seen_at: string;
+};
+
+type ScoredRow = {
+  row: AccountRow;
+  bucket: number;
+  strength: number;
+};
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS accounts (
   domain TEXT NOT NULL,
@@ -68,8 +82,11 @@ CREATE TABLE IF NOT EXISTS accounts (
 );
 
 CREATE INDEX IF NOT EXISTS idx_accounts_username ON accounts(username);
+CREATE INDEX IF NOT EXISTS idx_accounts_domain ON accounts(domain);
 CREATE INDEX IF NOT EXISTS idx_accounts_last_seen_at ON accounts(last_seen_at DESC);
 `;
+
+const SEARCH_CANDIDATE_LIMIT = 200;
 
 let sqlJsPromise: Promise<SqlJsModule> | null = null;
 
@@ -129,6 +146,130 @@ function normalizeHasOtp(hasOtp?: boolean): number {
 
 function escapeLikePattern(input: string): string {
   return input.replace(/[\\%_]/g, "\\$&");
+}
+
+function tokenize(value: string): string[] {
+  return value
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .map((token) => token.trim())
+    .filter(Boolean);
+}
+
+function editDistanceAtMostOne(left: string, right: string): boolean {
+  if (left === right) {
+    return true;
+  }
+
+  const lengthDifference = Math.abs(left.length - right.length);
+  if (lengthDifference > 1) {
+    return false;
+  }
+
+  let i = 0;
+  let j = 0;
+  let edits = 0;
+
+  while (i < left.length && j < right.length) {
+    if (left[i] === right[j]) {
+      i += 1;
+      j += 1;
+      continue;
+    }
+
+    edits += 1;
+    if (edits > 1) {
+      return false;
+    }
+
+    if (left.length > right.length) {
+      i += 1;
+    } else if (right.length > left.length) {
+      j += 1;
+    } else {
+      i += 1;
+      j += 1;
+    }
+  }
+
+  if (i < left.length || j < right.length) {
+    edits += 1;
+  }
+
+  return edits <= 1;
+}
+
+function compareIsoDescending(left: string, right: string): number {
+  if (left === right) {
+    return 0;
+  }
+
+  return left > right ? -1 : 1;
+}
+
+function scoreCandidate(row: AccountRow, query: string): ScoredRow | null {
+  const normalizedQuery = query.trim().toLowerCase();
+  if (!normalizedQuery) {
+    return {
+      row,
+      bucket: 99,
+      strength: 0,
+    };
+  }
+
+  const domain = row.domain.toLowerCase();
+  const username = row.username.toLowerCase();
+  const queryTokens = tokenize(normalizedQuery);
+  const domainTokens = tokenize(domain);
+  const usernameTokens = tokenize(username);
+
+  if (domain === normalizedQuery) {
+    return { row, bucket: 0, strength: 0 };
+  }
+
+  if (domain.endsWith(`.${normalizedQuery}`)) {
+    return { row, bucket: 1, strength: 0 };
+  }
+
+  if (queryTokens.length > 0 && queryTokens.every((token) => domainTokens.some((candidate) => candidate.startsWith(token)))) {
+    return { row, bucket: 2, strength: normalizedQuery.length * -1 };
+  }
+
+  if (domain.includes(normalizedQuery)) {
+    return { row, bucket: 3, strength: domain.indexOf(normalizedQuery) };
+  }
+
+  if (
+    queryTokens.length > 0 &&
+    queryTokens.every((token) => domainTokens.some((candidate) => editDistanceAtMostOne(candidate, token)))
+  ) {
+    return { row, bucket: 4, strength: 0 };
+  }
+
+  if (editDistanceAtMostOne(domain, normalizedQuery)) {
+    return { row, bucket: 4, strength: 1 };
+  }
+
+  if (username.startsWith(normalizedQuery)) {
+    return { row, bucket: 5, strength: 0 };
+  }
+
+  if (username.includes(normalizedQuery)) {
+    return { row, bucket: 6, strength: username.indexOf(normalizedQuery) };
+  }
+
+  if (
+    queryTokens.length > 0 &&
+    queryTokens.every((token) => usernameTokens.some((candidate) => editDistanceAtMostOne(candidate, token)))
+  ) {
+    return { row, bucket: 7, strength: 0 };
+  }
+
+  if (editDistanceAtMostOne(username, normalizedQuery)) {
+    return { row, bucket: 7, strength: 1 };
+  }
+
+  return null;
 }
 
 function toRecord(row: {
@@ -238,13 +379,7 @@ export async function createAccountRepository(options: AccountRepositoryOptions 
       const trimmed = query.trim();
 
       if (!trimmed) {
-        const rows = await all<{
-          domain: string;
-          username: string;
-          has_otp: number;
-          first_seen_at: string;
-          last_seen_at: string;
-        }>(
+        const rows = await all<AccountRow>(
           db,
           `
             SELECT domain, username, has_otp, first_seen_at, last_seen_at
@@ -257,26 +392,66 @@ export async function createAccountRepository(options: AccountRepositoryOptions 
       }
 
       const escaped = escapeLikePattern(trimmed);
-      const rows = await all<{
-        domain: string;
-        username: string;
-        has_otp: number;
-        first_seen_at: string;
-        last_seen_at: string;
-      }>(
+      const rows = await all<AccountRow>(
         db,
         `
           SELECT domain, username, has_otp, first_seen_at, last_seen_at
           FROM accounts
           WHERE domain = ?
              OR domain LIKE ? ESCAPE '\\'
+             OR domain LIKE ? ESCAPE '\\'
+             OR username LIKE ? ESCAPE '\\'
              OR username LIKE ? ESCAPE '\\'
           ORDER BY last_seen_at DESC, domain ASC, username ASC
+          LIMIT ?
         `,
-        [trimmed, `%${escaped}`, `%${escaped}%`],
+        [trimmed, `%${escaped}`, `%${escaped}%`, `${escaped}%`, `%${escaped}%`, SEARCH_CANDIDATE_LIMIT],
       );
+      const fallbackRows = await all<AccountRow>(
+        db,
+        `
+          SELECT domain, username, has_otp, first_seen_at, last_seen_at
+          FROM accounts
+          ORDER BY last_seen_at DESC, domain ASC, username ASC
+          LIMIT ?
+        `,
+        [SEARCH_CANDIDATE_LIMIT],
+      );
+      const candidates = new Map<string, AccountRow>();
+      for (const row of rows) {
+        candidates.set(`${row.domain}\u0000${row.username}`, row);
+      }
+      for (const row of fallbackRows) {
+        const key = `${row.domain}\u0000${row.username}`;
+        if (!candidates.has(key)) {
+          candidates.set(key, row);
+        }
+      }
 
-      return rows.map(toRecord);
+      return [...candidates.values()]
+        .map((row) => scoreCandidate(row, trimmed))
+        .filter((row): row is ScoredRow => row !== null)
+        .sort((left, right) => {
+          if (left.bucket !== right.bucket) {
+            return left.bucket - right.bucket;
+          }
+          if (left.strength !== right.strength) {
+            return left.strength - right.strength;
+          }
+
+          const recency = compareIsoDescending(left.row.last_seen_at, right.row.last_seen_at);
+          if (recency !== 0) {
+            return recency;
+          }
+
+          const domainComparison = left.row.domain.localeCompare(right.row.domain);
+          if (domainComparison !== 0) {
+            return domainComparison;
+          }
+
+          return left.row.username.localeCompare(right.row.username);
+        })
+        .map(({ row }) => toRecord(row));
     },
 
     async close(): Promise<void> {
