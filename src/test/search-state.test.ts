@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { createPasswordSearchWorkflow } from "../apw";
+import { createAuthPromptSubmitActionProps, createPasswordSearchWorkflow } from "../apw";
 import { test } from "./test-harness";
 
 function deferred<T>() {
@@ -433,4 +433,17 @@ test("fetches password and otp secrets for the selected account", async () => {
   assert.equal(otpOutcome.kind, "secret");
   assert.equal(otpOutcome.action, "otp");
   assert.equal(otpOutcome.value, "123456");
+});
+
+test("trims and forwards auth prompt submissions", async () => {
+  const submissions: string[] = [];
+  const props = createAuthPromptSubmitActionProps(async (pin: string) => {
+    submissions.push(pin);
+  });
+
+  assert.equal(typeof props.onSubmit, "function");
+
+  await props.onSubmit({ pin: " 123456 " });
+
+  assert.deepEqual(submissions, ["123456"]);
 });

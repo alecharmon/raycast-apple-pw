@@ -231,9 +231,23 @@ function createDefaultRunner(commandCandidates: string[]): ApplePwRunner {
 }
 
 function parseJsonPayload<T>(stdout: string, stderr: string): T {
-  const candidates = [stdout.trim(), stderr.trim()].filter(Boolean);
+  const buffers = [stdout, stderr]
+    .flatMap((buffer) => {
+      const trimmed = buffer.trim();
+      if (!trimmed) {
+        return [];
+      }
 
-  for (const candidate of candidates) {
+      const lines = trimmed
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean);
+
+      return [trimmed, ...lines.reverse()];
+    })
+    .filter(Boolean);
+
+  for (const candidate of buffers) {
     try {
       return JSON.parse(candidate) as T;
     } catch {

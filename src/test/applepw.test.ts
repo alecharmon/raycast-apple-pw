@@ -242,3 +242,37 @@ test("authenticate runs request and response", async () => {
     },
   ]);
 });
+
+test("authenticate tolerates non-json log lines before the json status", async () => {
+  let callCount = 0;
+  const client = createApplePwClient({
+    runner: async () => {
+      callCount += 1;
+      if (callCount === 1) {
+        return {
+          stdout: JSON.stringify({
+            salt: "salt-value",
+            serverKey: "server-key-value",
+            username: "user@example.com",
+            clientKey: "client-key-value",
+          }),
+          stderr: "",
+          exitCode: 0,
+          signal: null,
+        };
+      }
+
+      return {
+        stdout: 'Challenge verified, updating config\n{"status":0}',
+        stderr: "",
+        exitCode: 0,
+        signal: null,
+      };
+    },
+    binaryPath: "/bin/applepw",
+  });
+
+  const result = await client.authenticate("123456");
+
+  assert.deepEqual(result, { status: 0 });
+});

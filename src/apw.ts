@@ -280,17 +280,18 @@ function SecretActionListItem({
   });
 }
 
-function AuthPromptForm({ prompt, onSubmit }: { prompt: string; onSubmit: (pin: string) => Promise<void> }) {
+export function AuthPromptForm({ prompt, onSubmit }: { prompt: string; onSubmit: (pin: string) => Promise<void> }) {
   const ui = getUiRuntime();
   const h = React.createElement;
 
   return h(
     ui.Form,
     {
-      actions: h(ui.ActionPanel, null, h(ui.Action.SubmitForm, { title: "Submit Activation Code" })),
-      onSubmit: async (values: { pin?: string }) => {
-        await onSubmit(values.pin?.trim() ?? "");
-      },
+      actions: h(
+        ui.ActionPanel,
+        null,
+        h(ui.Action.SubmitForm, createAuthPromptSubmitActionProps(onSubmit)),
+      ),
     },
     h(ui.Form.Description, {
       title: "Authentication Required",
@@ -302,6 +303,15 @@ function AuthPromptForm({ prompt, onSubmit }: { prompt: string; onSubmit: (pin: 
       placeholder: "Enter the code from Apple Passwords",
     }),
   );
+}
+
+export function createAuthPromptSubmitActionProps(onSubmit: (pin: string) => Promise<void>) {
+  return {
+    title: "Submit Activation Code",
+    onSubmit: async (values: { pin?: string }) => {
+      await onSubmit(values.pin?.trim() ?? "");
+    },
+  };
 }
 
 export default function Command() {
@@ -360,6 +370,8 @@ export default function Command() {
     }
 
     const requestId = ++requestIdRef.current;
+    setRows([]);
+    setAuthPrompt(null);
     setIsLoading(true);
 
     void workflow
@@ -464,6 +476,24 @@ export default function Command() {
 
   const ui = getUiRuntime();
   const h = React.createElement;
+  const trimmedQuery = query.trim();
+  const emptyState = isLoading
+    ? {
+        icon: ui.Icon.Key,
+        title: "Searching Apple Passwords",
+        description: `Looking up ${trimmedQuery}...`,
+      }
+    : trimmedQuery
+      ? {
+          icon: ui.Icon.Key,
+          title: "No matches found",
+          description: `No passwords were found for ${trimmedQuery}.`,
+        }
+      : {
+          icon: ui.Icon.Key,
+          title: "Search your passwords",
+          description: "Type a domain or email fragment to sync from Apple Passwords.",
+        };
 
   return h(
     ui.List,
@@ -473,11 +503,7 @@ export default function Command() {
       onSearchTextChange: setQuery,
     },
     rows.length === 0
-      ? h(ui.List.EmptyView, {
-          icon: ui.Icon.Key,
-          title: "Search your passwords",
-          description: "Type a domain or email fragment to sync from Apple Passwords.",
-        })
+      ? h(ui.List.EmptyView, emptyState)
       : rows.map((account) =>
           h(SecretActionListItem, {
             key: `${account.domain}:${account.username}`,
