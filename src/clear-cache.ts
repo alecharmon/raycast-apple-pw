@@ -1,5 +1,4 @@
-import { confirmAlert, Alert, showHUD, showToast, Toast } from "@raycast/api";
-import { rm } from "node:fs/promises";
+import { confirmAlert, Alert, showHUD, showToast, Toast, trash } from "@raycast/api";
 import { resolveAccountDbPath } from "./db";
 
 export default async function Command() {
@@ -20,7 +19,7 @@ export default async function Command() {
   }
 
   try {
-    await rm(dbPath, { force: false });
+    await trash(dbPath);
     await showHUD("Cache cleared");
   } catch (error) {
     if (error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT") {

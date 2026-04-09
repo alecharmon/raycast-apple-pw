@@ -31,7 +31,6 @@
   ],
   "dependencies": {
     "@raycast/api": "^1.104.11",
-    "@raycast/utils": "^1.17.0",
     "sql.js": "^1.14.1"
   },
   "devDependencies": {

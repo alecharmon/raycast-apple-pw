@@ -117,11 +117,7 @@ type ApplePwJsonPayload<T> = {
 
 const AUTH_PROMPT = "Enter PIN:";
 const DEFAULT_REPO_BINARY_PATH = resolve(process.cwd(), "../../applepw");
-const COMMON_BINARY_PATHS = [
-  "/opt/homebrew/bin/applepw",
-  "/usr/local/bin/applepw",
-  "/Users/alecharmon/.cargo/bin/applepw",
-];
+const COMMON_BINARY_PATHS = ["/opt/homebrew/bin/applepw", "/usr/local/bin/applepw"];
 
 export interface ApplePwBinaryResolutionOptions {
   binaryPath?: string;
@@ -367,8 +363,6 @@ export function createApplePwClient(options: ApplePwClientOptions = {}): ApplePw
       args,
       exitCode: result.exitCode,
       signal: result.signal,
-      stdout: result.stdout,
-      stderr: result.stderr,
     });
     return buildCommandOutcome<T>(result, binaryPath, args);
   }

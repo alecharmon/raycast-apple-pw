@@ -326,7 +326,6 @@ export function createPasswordSearchWorkflow(options: PasswordSearchWorkflowOpti
       domain: account.domain,
       username: account.username,
       resultCount: result.payload.length,
-      firstResult: result.payload[0],
     });
     clearPendingAction(requestId);
     await repository.markAccountUsed(account.domain, account.username);
@@ -878,7 +877,7 @@ export default function Command() {
       ? {
           icon: ui.Icon.Key,
           title: "No matches found",
-          description: `No passwords were found for ${trimmedQuery}.`,
+          description: `No passwords were found for ${trimmedQuery}. For improved search experience, import your password domains from an Apple Passwords CSV.`,
         }
       : {
           icon: ui.Icon.Key,
@@ -895,14 +894,12 @@ export default function Command() {
     rows.length === 0
       ? h(ui.List.EmptyView, {
           ...emptyState,
-          actions: trimmedQuery
-            ? h(
-                ui.ActionPanel,
-                null,
-                createRetrySearchAction(handleRetrySearch),
-                createImportCsvAction(handleCsvImport),
-              )
-            : undefined,
+          actions: h(
+            ui.ActionPanel,
+            null,
+            trimmedQuery ? createRetrySearchAction(handleRetrySearch) : null,
+            createImportCsvAction(handleCsvImport),
+          ),
         })
       : rows.map((account) =>
           h(SecretActionListItem, {
