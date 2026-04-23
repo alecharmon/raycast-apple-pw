@@ -4,6 +4,7 @@ import {
   buildAuthResponseArgs,
   createApplePwClient,
   resolveApplePwBinaryCandidates,
+  sanitizeLoggedArgs,
 } from "../applepw";
 import { test } from "./test-harness";
 
@@ -181,6 +182,17 @@ test("builds auth response arguments correctly", () => {
     "server-key-value",
     "--client-key",
     "client-key-value",
+    "--username",
+    "user@example.com",
+  ]);
+});
+
+test("sanitizeLoggedArgs redacts pin values", () => {
+  assert.deepEqual(sanitizeLoggedArgs(["auth", "response", "--pin", "123456", "--username", "user@example.com"]), [
+    "auth",
+    "response",
+    "--pin",
+    "[REDACTED]",
     "--username",
     "user@example.com",
   ]);

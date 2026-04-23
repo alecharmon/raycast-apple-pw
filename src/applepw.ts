@@ -143,6 +143,10 @@ function debugLog(event: string, details: Record<string, unknown>) {
   console.log(`[applepw-raycast] ${event}`, JSON.stringify(details));
 }
 
+export function sanitizeLoggedArgs(args: string[]): string[] {
+  return args.map((arg, index) => (args[index - 1] === "--pin" ? "[REDACTED]" : arg));
+}
+
 function createDefaultRunner(commandCandidates: string[]): ApplePwRunner {
   return async (_command, args) => {
     let lastError: unknown;
@@ -356,11 +360,12 @@ export function createApplePwClient(options: ApplePwClientOptions = {}): ApplePw
   const binaryPath = binaryCandidates[0];
 
   async function execute<T extends object>(args: string[]): Promise<ApplePwCommandOutcome<T>> {
-    debugLog("applepw.execute.start", { binaryPath, args });
+    const safeArgs = sanitizeLoggedArgs(args);
+    debugLog("applepw.execute.start", { binaryPath, args: safeArgs });
     const result = await runner(binaryPath, args);
     debugLog("applepw.execute.result", {
       binaryPath,
-      args,
+      args: safeArgs,
       exitCode: result.exitCode,
       signal: result.signal,
     });
@@ -424,7 +429,6 @@ export function createApplePwClient(options: ApplePwClientOptions = {}): ApplePw
       domain,
       username,
       resultCount: normalizeResults(response.payload?.results).length,
-      payload: response.payload,
     });
     return {
       kind: "success",
